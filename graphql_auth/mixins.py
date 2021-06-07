@@ -1,39 +1,37 @@
 from smtplib import SMTPException
 
-from django.core.signing import BadSignature, SignatureExpired
-from django.core.exceptions import ObjectDoesNotExist
+import graphene
 from django.contrib.auth import get_user_model
-from django.contrib.auth.forms import SetPasswordForm, PasswordChangeForm
+from django.contrib.auth.forms import PasswordChangeForm, SetPasswordForm
+from django.core.exceptions import ObjectDoesNotExist
+from django.core.signing import BadSignature, SignatureExpired
 from django.db import transaction
 from django.utils.module_loading import import_string
-
-import graphene
-
-from graphql_jwt.exceptions import JSONWebTokenError, JSONWebTokenExpired
 from graphql_jwt.decorators import token_auth
+from graphql_jwt.exceptions import JSONWebTokenError, JSONWebTokenExpired
 
-from .forms import RegisterForm, EmailForm, UpdateAccountForm, PasswordLessRegisterForm
 from .bases import Output
-from .models import UserStatus
-from .settings import graphql_auth_settings as app_settings
+from .constants import Messages, TokenAction
+from .decorators import (
+    password_confirmation_required,
+    secondary_email_required,
+    verification_required,
+)
 from .exceptions import (
-    UserAlreadyVerified,
-    UserNotVerified,
-    WrongUsage,
-    TokenScopeError,
     EmailAlreadyInUse,
     InvalidCredentials,
     PasswordAlreadySetError,
+    TokenScopeError,
+    UserAlreadyVerified,
+    UserNotVerified,
+    WrongUsage,
 )
-from .constants import Messages, TokenAction
-from .utils import revoke_user_refresh_token, get_token_paylod, using_refresh_tokens
+from .forms import EmailForm, PasswordLessRegisterForm, RegisterForm, UpdateAccountForm
+from .models import UserStatus
+from .settings import graphql_auth_settings as app_settings
 from .shortcuts import get_user_by_email, get_user_to_login
 from .signals import user_registered, user_verified
-from .decorators import (
-    password_confirmation_required,
-    verification_required,
-    secondary_email_required,
-)
+from .utils import get_token_paylod, revoke_user_refresh_token, using_refresh_tokens
 
 UserModel = get_user_model()
 if app_settings.EMAIL_ASYNC_TASK and isinstance(app_settings.EMAIL_ASYNC_TASK, str):
@@ -76,6 +74,7 @@ class RegisterMixin(Output):
             if using_refresh_tokens():
                 cls._meta.fields["refresh_token"] = graphene.Field(graphene.String)
             cls._meta.fields["token"] = graphene.Field(graphene.String)
+        cls._meta.fields["activation_token"] = graphene.Field(graphene.String)
         return super().Field(*args, **kwargs)
 
     @classmethod
@@ -126,7 +125,13 @@ class RegisterMixin(Output):
                         for field in cls._meta.fields:
                             return_value[field] = getattr(payload, field)
                         return cls(**return_value)
-                    return cls(success=True)
+
+                    email_context = user.status.get_email_context(
+                        info,
+                        app_settings.ACTIVATION_PATH_ON_EMAIL,
+                        TokenAction.ACTIVATION,
+                    )
+                    return cls(success=True, activation_token=email_context["token"])
                 else:
                     return cls(success=False, errors=f.errors.get_json_data())
         except EmailAlreadyInUse:
